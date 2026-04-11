@@ -1,0 +1,16 @@
+{
+    "prod_token": "MTQ2OTQ2NjYzNDYwMjE1NjA2NA.GyVW2B.3CHyj9q6zJrm7qJbtXZtxfqyl4p1O2ER8E-H2M",
+    "beta_token": "MTQ2OTUwMDYyNjEyNjc3MDIxMA.GDAWm2.RFBSgyYfX_JFO_FzaSlVYiXbsXvLeriXSQ2kkQ",
+    "DB_URL": "mongodb+srv://admin:Tt5hKLIyY1LshJuJ@vertexcluster.us67g8y.mongodb.net/?retryWrites=true&w=majority",
+    "isBeta": true,
+    "debug": false,
+    "disconnectTimer": false,
+    "error_log_channel": "1470370208047960107",
+    "command_logs": "1470370208047960107",
+    "guildsWhitelist": [
+        "1411468358079090720",
+        "1412478276512776227",
+        "1449610719552339980",
+        "1470369536443285630"
+    ]
+}
