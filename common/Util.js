@@ -76,15 +76,16 @@ async function getProtocolVersion() {
 
     const $ = cheerio.load((await response2.text()));
     const text = $('p').text();
-    let protocolVersion = text.match(/\b\d{3}\b/g);
+    // updated regex to match both 3-digit and 4-digit protocol numbers
+    let protocolVersion = text.match(/\b\d{3,4}\b/g);
 
     if (protocolVersion) protocolVersion = protocolVersion.filter(version => Number(version) >= 900);
-    if (!protocolVersion || protocolVersion.length === 0) protocolVersion = "944";
+    if (!protocolVersion || protocolVersion.length === 0) protocolVersion = "2168";
 
     return protocolVersion;
   } catch (error) {
     console.error(error);
-    return "944";
+    return "2168";
   }
 }
 
@@ -102,7 +103,7 @@ async function getGameVersion() {
     return version;
   } catch (error) {
     console.error(error);
-    return "1.26.10";
+    return "1.26.44";
   }
 }
 
@@ -147,7 +148,6 @@ function translateDisconnectMessage(disconnect) {
       if (message.includes(key)) {
         message = message.replace(key, value).replace(/%/g, "").replace(/§./g, "");
 
-        // Correctly handle %disconnect.kicked.reason, I could not find a better way to do it at the start.
         if (message.startsWith("You were kicked from the game.reason")) {
           message = message.replace("You were kicked from the game.reason", "You were kicked from the game:");
         }
@@ -173,7 +173,7 @@ function cleanLeftovers(intervals, timeouts) {
   try {
     for (let i = 0; i < intervals.length; i++) clearInterval(intervals[i]);
     for (let i = 0; i < timeouts.length; i++) clearTimeout(timeouts[i]);
-  } catch {} // Just in case of non existing intervals (cough cough sub client move intervals!)
+  } catch {}
 }
 
 function getVersionLog(version, returnAllVersions) {
@@ -277,7 +277,6 @@ function getInputMode(deviceOS) {
 function translateUUID(uuid = "") {
   if (!uuid) return;
 
-  // ts-check says this might be null at times, but like.. i dont care
   const bytes = uuid.replace(/-/g, "").match(/.{2}/g).reverse();
 
   if (!bytes) return;
