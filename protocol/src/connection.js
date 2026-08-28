@@ -3,14 +3,12 @@ const { Framer } = require('./transforms/framer')
 
 const cipher = require('./transforms/encryption')
 
-const config = require("../../ext/config.json")
-
 const ClientStatus = {
   Disconnected: 0,
   Connecting: 1,
-  Authenticating: 2, // Handshaking
-  Initializing: 3, // Authed, need to spawn
-  Initialized: 4 // play_status spawn sent by server, client responded with SetPlayerInit packet
+  Authenticating: 2,
+  Initializing: 3,
+  Initialized: 4
 }
 
 class Connection extends EventEmitter {
@@ -40,19 +38,7 @@ class Connection extends EventEmitter {
     try {
       this.batch.addEncodedPacket(this.serializer.createPacketBuffer({ name, params }))
     } catch (error) {
-      if (config?.debug) console.log(error)
-    }
-
-    this.encryptionEnabled ? this.sendEncryptedBatch(this.batch) : this.sendDecryptedBatch(this.batch)
-  }
-
-  writeBatch(name, params, count) {
-    if (!this.batch?.addEncodedPackets) return
-
-    try {
-      this.batch.addEncodedPackets(Array(count).fill(this.serializer.createPacketBuffer({ name, params })))
-    } catch (error) {
-      if (config.debug) console.log(error)
+      console.log(error)
     }
 
     this.encryptionEnabled ? this.sendEncryptedBatch(this.batch) : this.sendDecryptedBatch(this.batch)
@@ -63,25 +49,15 @@ class Connection extends EventEmitter {
 
     try {
       this.batch.addEncodedPacket(buffer)
-    } catch (error) { }
+    } catch (error) {
+      console.log(error)
+    }
 
     this.encryptionEnabled ? this.sendEncryptedBatch(this.batch) : this.sendDecryptedBatch(this.batch)
   }
 
-  writeBufferBatch(buffer, count, num) {
-    if (!this.batch?.addEncodedPackets) return
-
-    try {
-      this.batch.addEncodedPackets(Array(count).fill(buffer))
-    } catch (error) {
-      if (config.debug) console.log(error)
-    }
-
-    this.encryptionEnabled ? this.sendEncryptedBatch(this.batch) : this.sendDecryptedBatch(this.batch, num)
-  }
-
-  sendDecryptedBatch(batch, num) {
-    this.sendMCPE(batch.encode(), true, num)
+  sendDecryptedBatch(batch) {
+    this.sendMCPE(batch.encode(), true)
   }
 
   sendEncryptedBatch(batch) {
@@ -89,14 +65,14 @@ class Connection extends EventEmitter {
     this.encrypt(buf)
   }
 
-  sendMCPE(buffer, immediate, num = 1) {
-    try {
-      this.connection.sendReliable(buffer, immediate, num)
-      this.batch.flush();
-    } catch {}
+  sendMCPE(buffer, immediate) {
+      try {
+        this.connection.sendReliable(buffer, immediate)
+      } finally {
+        this.batch.flush()
+      }
   }
 
-  // These are callbacks called from encryption.js
   onEncryptedPacket = (buf) => {
     this.sendMCPE(this.batchHeader ? Buffer.concat([Buffer.from([this.batchHeader]), buf]) : buf)
   }
@@ -106,8 +82,8 @@ class Connection extends EventEmitter {
     for (let i = 0; i < packets.length; i++) this.readPacket(packets[i])
   }
 
-  handle(buffer) { // handle encapsulated
-    if (!this.batchHeader || buffer[0] === this.batchHeader) { // wrapper
+  handle(buffer) {
+    if (!this.batchHeader || buffer[0] === this.batchHeader) {
       if (this.encryptionEnabled) {
         this.decrypt(buffer.slice(1))
       } else {

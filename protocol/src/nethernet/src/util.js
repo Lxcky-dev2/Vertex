@@ -12,7 +12,7 @@ const createPacketData = (packetName, packetId, senderId, additionalParams = {})
     name: packetName,
     params: {
       sender_id: senderId,
-      reserved: Buffer.alloc(8),
+      reserved: Buffer.allocUnsafe(8),
       ...additionalParams
     }
   }
@@ -31,8 +31,8 @@ const processSecurePacket = (buffer, deserializer) => {
   if (buffer.length < 32) throw new Error('Packet is too short')
 
   const decryptedData = decrypt(buffer.slice(32))
-
   const checksum = calculateChecksum(decryptedData)
+
   if (Buffer.compare(buffer.slice(0, 32), checksum) !== 0) throw new Error('Checksum mismatch')
 
   const packet = deserializer.parsePacketBuffer(decryptedData)

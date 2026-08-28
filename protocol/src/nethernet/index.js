@@ -8,8 +8,4 @@ const SignalType = {
   ConnectError: 'CONNECTERROR'
 }
 
-module.exports = {
-  Client,
-  SignalType,
-  SignalStructure
-}
+module.exports = { Client, SignalType, SignalStructure }

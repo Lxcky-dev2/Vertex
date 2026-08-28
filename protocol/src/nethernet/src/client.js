@@ -1,21 +1,24 @@
 const dgram = require('node:dgram')
+const crypto = require('node:crypto')
 const { EventEmitter } = require('node:events')
 const { Connection } = require('./connection')
 const { PACKET_TYPE, createDeserializer, createSerializer } = require('./serializer')
 const { SignalStructure, SignalType } = require('./signalling')
 const { createPacketData, getRandomUint64, prepareSecurePacket, processSecurePacket } = require('./util')
 const { RTCPeerConnection, RTCIceCandidate } = require('@roamhq/wrtc')
+const { CompactSign, importPKCS8 } = require("jose");
 
 const PORT = 7551
 const BROADCAST_ADDRESS = '255.255.255.255'
 
 class Client extends EventEmitter {
-  constructor(networkId, broadcastAddress = BROADCAST_ADDRESS, closeOnError) {
+  constructor(networkId, broadcastAddress = BROADCAST_ADDRESS, token, identityPrivateKey) {
     super()
 
     this.serverNetworkId = networkId
     this.broadcastAddress = broadcastAddress
-    this.closeOnError = closeOnError
+    this.token = token
+    this.identityPrivateKey = identityPrivateKey
     this.networkId = getRandomUint64()
     this.connectionId = getRandomUint64()
     this.socket = dgram.createSocket('udp4')
@@ -56,11 +59,9 @@ class Client extends EventEmitter {
     };
 
     if (parts[8] === "raddr") parsedData.relatedAddress = parts[9];
-
     if (parts[10] === "rport") parsedData.relatedPort = parseInt(parts[11]);
 
     const ufragIndex = parts.indexOf("ufrag");
-
     if (ufragIndex !== -1) parsedData.usernameFragment = parts[ufragIndex + 1];
 
     this.rtcConnection.addIceCandidate(new RTCIceCandidate(parsedData)).catch(e => console.error("ICE:", e));
@@ -69,9 +70,12 @@ class Client extends EventEmitter {
   handleAnswer(signal) {
     if (!this.rtcConnection) return
 
-    switch (this.rtcConnection.connectionState) {
+    switch (this.rtcConnection.signalingState) {
       case "stable":
+        console.error("Received answer in stable state, ignoring.")
+        return
       case "closed":
+        console.error("Received answer for closed connection, ignoring.")
         return
     }
 
@@ -79,12 +83,40 @@ class Client extends EventEmitter {
       this.rtcConnection.setRemoteDescription({ type: 'answer', sdp: signal.data })
     } catch (e) {
       console.error("Failed to set remote description:", e)
-      if (this.closeOnError) this.close()
     }
   }
 
+  async createAssertion(fingerprint, token) {
+    const pkcs8Key = this.identityPrivateKey
+      ? this.identityPrivateKey.export({ type: "pkcs8", format: "pem" })
+      : crypto.generateKeyPairSync("ec", { namedCurve: "P-384", privateKeyEncoding: { type: "pkcs8", format: "pem" } }).privateKey
+
+    const payload = JSON.stringify({ fingerprint: [{ algorithm: "sha-256", digest: fingerprint }] });
+
+    const ecPrivateKey = await importPKCS8(pkcs8Key, "ES384");
+    const encoder = new TextEncoder();
+
+    const jws = await new CompactSign(encoder.encode(payload)).setProtectedHeader({ alg: "ES384" }).sign(ecPrivateKey);
+
+    const parts = jws.split(".");
+    const fingerprints = `${parts[0]}..${parts[2]}`;
+
+    const data = {
+      assertion: JSON.stringify({
+        fingerprints,
+        token
+      }),
+      idp: {
+        domain: "https://authorization.franchise.minecraft-services.net/",
+        protocol: "default",
+      }
+    }
+
+    return Buffer.from(JSON.stringify(data)).toString('base64')
+  }
+
   async createOffer() {
-    this.rtcConnection = new RTCPeerConnection({ iceServers: this.credentials })
+    this.rtcConnection = new RTCPeerConnection({ iceServers: this.credentials, bundlePolicy: 'max-bundle' })
     this.connection = new Connection(this, this.connectionId, this.rtcConnection)
 
     const reliable = this.rtcConnection.createDataChannel('ReliableDataChannel', { ordered: true })
@@ -93,29 +125,41 @@ class Client extends EventEmitter {
 
     this.rtcConnection.onicecandidate = (event) => {
       if (!event.candidate) return
-      if (event.candidate.candidate.includes("tcp") || event.candidate.candidate.includes("::1") || event.candidate.candidate.includes("127.0.0.1")) return
+
+      if (event.candidate.candidate.includes("tcp") || event.candidate.candidate.includes("::1") || event.candidate.candidate.includes("127.0.0.1")) return;
 
       this.signalHandler(new SignalStructure(SignalType.CandidateAdd, this.connectionId, event.candidate.candidate, this.networkId, this.serverNetworkId))
     }
 
     this.rtcConnection.onconnectionstatechange = () => {
-      switch (this.rtcConnection?.connectionState) {
-        case "new":
+      const state = this.rtcConnection?.connectionState
+      
+      switch (state) {
         case "connected":
           this.emit('connected', this.connection)
           break;
         case "closed":
         case "disconnected":
         case "failed":
-          this.emit('disconnect', this.connectionId, 'disconnected')
-          this.close()
+          this.emit('disconnect', this.connectionId, state)
           break;
       }
     }
 
     const offer = await this.rtcConnection.createOffer()
     const baseSdp = offer.sdp ?? ''
-    const sdp = baseSdp.replace(/^o=.*$/m, `o=- ${this.networkId} 2 IN IP4 127.0.0.1`)
+
+    const fingerprint = baseSdp.match(/^a=fingerprint:sha-256\s+(.*)$/m);
+    const fingerprintValue = fingerprint[1];
+
+    let sdp = baseSdp.replace(/^o=.*$/m, `o=- ${this.networkId} 2 IN IP4 127.0.0.1`);
+
+    if (fingerprintValue) {
+      const assertion = await this.createAssertion(fingerprintValue, this.token);
+
+      sdp = sdp.replace(/^(a=fingerprint:sha-256\s+.*)$/m, `$1\na=identity:${assertion}`);
+    }
+
     const localDescription = { type: offer.type, sdp }
 
     await this.rtcConnection.setLocalDescription(localDescription);
@@ -163,11 +207,25 @@ class Client extends EventEmitter {
         this.handleAnswer(signal)
         break
       case SignalType.CandidateAdd:
-        if (signal.networkId === this.serverNetworkId) signal.networkId = this.networkId;
-
+        if (signal.networkId === this.serverNetworkId) signal.networkId = this.networkId
+        
         this.handleCandidate(signal)
         break
+      case SignalType.ConnectError:
+        this.handleConnectError(signal)
+        break
     }
+  }
+
+  handleConnectError(signal) {
+    console.error(`NetherNet connect error (code ${signal.data}) for connection ${signal.connectionId}`)
+
+    if (this.rtcConnection) {
+      this.rtcConnection.close()
+      this.rtcConnection = null
+    }
+
+    this.emit('disconnect', signal.connectionId, `connect_error:${signal.data}`)
   }
 
   sendDiscoveryRequest() {
@@ -195,8 +253,8 @@ class Client extends EventEmitter {
     await this.createOffer()
   }
 
-  send(buffer, num) {
-    this.connection.send(buffer, num)
+  send(buffer) {
+    this.connection.send(buffer)
   }
 
   ping() {

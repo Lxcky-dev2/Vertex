@@ -1,4 +1,4 @@
-const MAX_MESSAGE_SIZE = 50000; // 262143 IS MAX LIMIT EXACTLY
+const MAX_MESSAGE_SIZE = 50000;
 
 const ensureBuffer = (data) => {
   if (Buffer.isBuffer(data)) return data
@@ -18,8 +18,6 @@ class Connection {
     this.unreliable = null
     this.promisedSegments = 0
     this.buf = Buffer.allocUnsafe(0)
-    this.chunks = []
-    this.totalByteLength = 0
     this.sendQueue = []
   }
 
@@ -29,6 +27,10 @@ class Connection {
       this.reliable.binaryType = 'arraybuffer'
       this.reliable.onmessage = (event) => this.handleMessage(event.data)
       this.reliable.onopen = () => this.flushQueue()
+      this.reliable.onclose = () => {
+        this.sendQueue.length = 0
+        this.nethernet.emit('disconnect', this.address, 'reliable_channel_closed')
+      }
     }
 
     if (unreliable) {
@@ -40,65 +42,48 @@ class Connection {
   handleMessage(data) {
     data = ensureBuffer(data)
 
-    if (data.length < 1) throw new Error("Unexpected EOF")
+    if (data.length < 2) throw new Error('Unexpected EOF')
 
     const segments = data[0]
+    data = data.subarray(1)
 
-    if (this.promisedSegments > 0 && this.promisedSegments - 1 !== segments) {
-      throw new Error(`Invalid promised segments: expected ${this.promisedSegments - 1}, got ${segments}`)
-    }
+    if (this.promisedSegments > 0 && this.promisedSegments - 1 !== segments) throw new Error(`Invalid promised segments: expected ${this.promisedSegments - 1}, got ${segments}`)
 
     this.promisedSegments = segments
-
-    if (!this.chunks) {
-      this.chunks = []
-      this.totalByteLength = 0
-    }
-
-    const payload = data.subarray(1)
-    this.chunks.push(payload)
-    this.totalByteLength += payload.length
+    this.buf = this.buf ? Buffer.concat([this.buf, data]) : data
 
     if (this.promisedSegments > 0) return
 
-    let finalBuffer = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks, this.totalByteLength)
-
-    this.nethernet.emit("encapsulated", finalBuffer)
-
-    this.chunks = []
-    this.totalByteLength = 0
+    this.nethernet.emit('encapsulated', this.buf)
+    this.buf = null;
   }
 
-  send(data, num = 1) {
+  send(data) {
     const payload = ensureBuffer(data)
 
-    switch (this.reliable.readyState) {
-      case 'open':
-        return this.sendNow(payload, num)
-      case 'closing':
-      case 'closed':
-        throw new Error('Reliable channel is closed')
-      default:
-        this.sendQueue.push(payload)
-        return 0
+    if (!this.reliable || this.reliable.readyState === 'connecting') {
+      this.sendQueue.push(payload)
+      return 0
     }
+
+    if (this.reliable.readyState === 'closed' || this.reliable.readyState === 'closing') return 0
+
+    return this.sendNow(payload)
   }
 
-  sendNow(data, num = 1) {
+  sendNow(data) {
     const segments = Math.ceil(data.length / MAX_MESSAGE_SIZE)
     const buffers = Array(segments)
 
     for (let i = 0; i < segments; i++) {
-      buffers[i] = data.subarray(i * MAX_MESSAGE_SIZE, Math.min((i + 1) * MAX_MESSAGE_SIZE, data.length))
+      buffers[i] = data.slice(i * MAX_MESSAGE_SIZE, Math.min((i + 1) * MAX_MESSAGE_SIZE, data.length))
     }
 
-    for (let i = 0; i < num; i++) {
-      for (let i = 0; i < buffers.length; i++) {
-        const message = Buffer.allocUnsafe(1 + buffers[i].length)
-        message[0] = segments - 1 - i
-        buffers[i].copy(message, 1)
-        this.reliable?.send(message)
-      }
+    for (let i = 0; i < buffers.length; i++) {
+      const message = Buffer.allocUnsafe(1 + buffers[i].length)
+      message[0] = segments - 1 - i
+      buffers[i].copy(message, 1)
+      this.reliable?.send(message)
     }
 
     return data.length

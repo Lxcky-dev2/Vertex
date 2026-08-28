@@ -4,12 +4,10 @@ const { SignalStructure } = require('../nethernet/index')
 const { v4fast: v4 } = require("uuid-1345")
 const JSONBigInt = require('json-bigint')({ useNativeBigInt: true })
 
-const PlayFabAPI = require("../../../common/PlayFab")
-
 const MAX_RETRIES = 5
 
-class NethernetSignalJSONRPC extends EventEmitter {
-    constructor(client, networkId, authflow, version, serverNetworkId) {
+class NethernetJSONRPC extends EventEmitter {
+    constructor(networkId, authflow, version, serverNetworkId) {
         super()
         this.networkId = networkId
         this.serverNetworkId = serverNetworkId
@@ -19,7 +17,6 @@ class NethernetSignalJSONRPC extends EventEmitter {
         this.credentials = []
         this.candidates = []
         this.signalCandidates = []
-        this.client = client
 
         this.pingInterval = null
         this.retryCount = 0
@@ -76,50 +73,28 @@ class NethernetSignalJSONRPC extends EventEmitter {
     }
 
     async reconnectWithBackoff() {
-        if (this.retryCount >= MAX_RETRIES) {
-            this.emit("error", new Error("Signal reconnection failed after max retries"));
-            return;
-        }
+        if (this.destroyed) return
 
-        await new Promise((r) => setTimeout(r, 15000));
+        const delay = Math.min(15000 * Math.max(1, this.retryCount), 60000)
+        await new Promise((r) => setTimeout(r, delay));
+
+        if (this.destroyed) return
 
         try {
             await this.init();
-        } catch (e) { }
+        } catch (e) {
+            console.error("Signal reconnect attempt failed, will retry:", e)
+            this.reconnectWithBackoff().catch(() => {})
+        }
     }
 
     async init() {
-        const pfb = await this.authflow.getPlayfabLogin().catch(e => {
-            throw e
-        })
-
-        if (pfb?.code) {
-            switch (pfb.code) {
-                case 403:
-                    if (pfb?.error === "AccountBanned") {
-                        // VERTEX will simply pick it up if it's banned by using this
-                        this.client.emit("error", "/multiplayer/bedrock/authentication");
-                    }
-                    break;
-            }
-
-            return
-        }
-
-        const xbl = await this.authflow.getMinecraftBedrockServicesToken({ version: this.version }).catch(e => {
-            throw e
-        })
+        const xbl = await this.authflow.getMinecraftBedrockServicesToken({ version: this.version })
 
         const address = `https://signal.franchise.minecraft-services.net/ws/v1.0/messaging/connect`;
 
-        if (typeof xbl?.mcToken != "string") {
-            this.client.emit("error", "No MCTOKEN Found")
-
-            return;
-        }
-
         try {
-            const ws = new WebSocket(address, { headers: { Authorization: xbl.mcToken, "session-id": this.networkId, "request-id": v4() } })
+            const ws = new WebSocket(address, { headers: { Authorization: xbl.mcToken, "session-id": v4(), "request-id": v4() } })
             this.ws = ws
             this.lastLiveness = Date.now()
 
@@ -159,7 +134,9 @@ class NethernetSignalJSONRPC extends EventEmitter {
 
     onError(err) {
         console.error(err);
-        this.client.emit("error", `Signaling WebSocket error`)
+        if (this.listenerCount("error") > 0) {
+            this.emit("error", err instanceof Error ? err : new Error(String(err)))
+        }
     }
 
     async onClose(code, reason) {
@@ -170,18 +147,14 @@ class NethernetSignalJSONRPC extends EventEmitter {
 
         if (this.destroyed) return
 
-        // 1000 close
-        // 1006 closure
-        // 1011 error
-        // 4401 unauthorized
-        const retryable = [1000, 1006, 1011, 4401].includes(code) || code === 0
+        console.warn(`Signal closed: ${code} ${reason} - reconnecting...`)
 
-        if (retryable && this.retryCount < MAX_RETRIES) {
-            this.retryCount++
+        this.retryCount++
+        try {
             await this.destroy(true)
-        } else {
-            await this.destroy(false)
-            this.emit("error", new Error(`Signal closed: ${code} ${reason}`))
+        } catch (err) {
+            console.error("Error while reconnecting signaling socket:", err)
+            this.reconnectWithBackoff().catch(() => {})
         }
     }
 
@@ -205,7 +178,6 @@ class NethernetSignalJSONRPC extends EventEmitter {
         if (Array.isArray(message.result?.TurnAuthServers)) {
             this.credentials = parseTurnServers(JSON.stringify(message.result))
             this.emit("credentials", this.credentials)
-            return
         }
 
         switch (message.method) {
@@ -214,10 +186,9 @@ class NethernetSignalJSONRPC extends EventEmitter {
                 break
             case "Signaling_ReceiveMessage_v1_0":
                 this.ws.send(JSON.stringify({ id: message.id, result: null, jsonrpc: "2.0" }))
-
-                for (const param of message.params) {
+                const params = Array.isArray(message.params)? message.params : message.params ? [message.params]: []
+                for (const param of params) {
                     this.sendDeliveryNotification(param.From, param.Id)
-
                     let signalMessage = param.Message
                     try {
                         const parsed = JSON.parse(param.Message)
@@ -230,7 +201,7 @@ class NethernetSignalJSONRPC extends EventEmitter {
                                 continue
                         }
                     } catch (e) {
-                        console.log(e)
+                        console.error(e)
                     }
 
                     if (signalMessage.includes("could not be delivered")) continue
@@ -281,22 +252,18 @@ class NethernetSignalJSONRPC extends EventEmitter {
         if (signal.type === "CANDIDATEADD" && !this.candidates.includes(signal)) {
             this.candidates.length === 0 ? signal.data += " network-cost 50" : signal.data += " network-cost 10"
 
-            if (signal.data.includes("tcp") || signal.data.includes("::1")) return;
+            if (signal.data.includes("tcp") || signal.data.includes("::1") || signal.data.includes("127.0.0.1")) return;
 
             this.candidates.push(signal)
-            // Don't write yet, just store for later, and then we will write them after connectrequest
             return
         }
 
         if (signal.type === "CONNECTREQUEST") this.connectionId = signal.connectionId
 
         const message = JSONBigInt.stringify({
-            jsonrpc: "2.0",
-            method: "Signaling_SendClientMessage_v1_0",
-            id: uuidv4,
             params: {
-                messageId: v4(),
-                toPlayerId: signal.serverNetworkId,
+                toPlayerId: String(signal.serverNetworkId ?? this.serverNetworkId),
+                messageId: uuidv4,
                 message: JSONBigInt.stringify({
                     params: {
                         netherNetId: String(signal.networkId),
@@ -305,7 +272,10 @@ class NethernetSignalJSONRPC extends EventEmitter {
                     jsonrpc: "2.0",
                     method: "Signaling_WebRtc_v1_0",
                 })
-            }
+            },
+            jsonrpc: "2.0",
+            method: "Signaling_SendClientMessage_v1_0",
+            id: uuidv4
         })
 
         this.ws.send(message)
@@ -317,11 +287,11 @@ class NethernetSignalJSONRPC extends EventEmitter {
         const uuidv4 = v4()
         const message = JSONBigInt.stringify({
             params: {
-                toPlayerId: toPlayerId,
+                toPlayerId,
                 messageId: uuidv4,
                 message: JSONBigInt.stringify({
                     params: {
-                        messageId: messageId
+                        messageId
                     },
                     jsonrpc: "2.0",
                     method: "Signaling_DeliveryNotification_V1_0"
@@ -336,7 +306,7 @@ class NethernetSignalJSONRPC extends EventEmitter {
     }
 }
 
-module.exports = { NethernetSignalJSONRPC }
+module.exports = { NethernetJSONRPC }
 
 function parseTurnServers(dataString) {
     const iceServers = []

@@ -1,11 +1,7 @@
-/* eslint-disable */
 const UUID = require('uuid-1345')
 const minecraft = require('./minecraft')
 const [Read, Write, SizeOf] = [{}, {}, {}]
 
-/**
- * UUIDs
- */
 Read.uuid = ['native', (buffer, offset) => {
   return {
     value: UUID.stringify(buffer.slice(offset, 16 + offset)),
@@ -18,10 +14,6 @@ Write.uuid = ['native', (value, buffer, offset) => {
   return offset + 16
 }]
 SizeOf.uuid = ['native', 16]
-
-/**
- * Rest of buffer
- */
 Read.restBuffer = ['native', (buffer, offset) => {
   return {
     value: buffer.slice(offset),
@@ -35,19 +27,21 @@ Write.restBuffer = ['native', (value, buffer, offset) => {
 SizeOf.restBuffer = ['native', (value) => {
   return value.length
 }]
-
-/**
- * Encapsulated data with length prefix
- */
 Read.encapsulated = ['parametrizable', (compiler, { lengthType, type }) => {
   return compiler.wrapCode(`
   const payloadSize = ${compiler.callType(lengthType, 'offset')}
+  if (payloadSize.value === 0) {
+    return { value: undefined, size: payloadSize.size }
+  }
   const { value, size } = ctx.${type}(buffer, offset + payloadSize.size)
   return { value, size: size + payloadSize.size }
 `.trim())
 }]
 Write.encapsulated = ['parametrizable', (compiler, { lengthType, type }) => {
   return compiler.wrapCode(`
+  if (value === undefined) {
+    return (ctx.${lengthType})(0, buffer, offset)
+  }
   const buf = Buffer.allocUnsafe(buffer.length - offset)
   const payloadSize = (ctx.${type})(value, buf, 0)
   let size = (ctx.${lengthType})(payloadSize, buffer, offset)
@@ -57,14 +51,13 @@ Write.encapsulated = ['parametrizable', (compiler, { lengthType, type }) => {
 }]
 SizeOf.encapsulated = ['parametrizable', (compiler, { lengthType, type }) => {
   return compiler.wrapCode(`
+    if (value === undefined) {
+      return (ctx.${lengthType})(0)
+    }
     const payloadSize = (ctx.${type})(value)
     return (ctx.${lengthType})(payloadSize) + payloadSize
 `.trim())
 }]
-
-/**
- * Read NBT until end of buffer or \0
- */
 Read.nbtLoop = ['context', (buffer, offset) => {
   const values = []
   while (buffer[offset] != 0) {
@@ -88,10 +81,6 @@ SizeOf.nbtLoop = ['context', (value, buffer, offset) => {
   }
   return size
 }]
-
-/**
- * Read rotation float encoded as a byte
- */
 Read.byterot = ['context', (buffer, offset) => {
   const val = buffer.readUint8(offset)
   return { value: (val * (360 / 256)), size: 1 }
@@ -104,22 +93,13 @@ Write.byterot = ['context', (value, buffer, offset) => {
 SizeOf.byterot = ['context', (value, buffer, offset) => {
   return 1
 }]
-
-/**
- * NBT
- */
 Read.nbt = ['native', minecraft.nbt[0]]
 Write.nbt = ['native', minecraft.nbt[1]]
 SizeOf.nbt = ['native', minecraft.nbt[2]]
-
 Read.lnbt = ['native', minecraft.lnbt[0]]
 Write.lnbt = ['native', minecraft.lnbt[1]]
 SizeOf.lnbt = ['native', minecraft.lnbt[2]]
 
-/**
- * Command Packet
- * - used for determining the size of the following enum
- */
 Read.enum_size_based_on_values_len = ['parametrizable', (compiler) => {
   return compiler.wrapCode(js(() => {
     if (values_len <= 0xff) return { value: 'byte', size: 0 }
@@ -143,13 +123,10 @@ SizeOf.enum_size_based_on_values_len = ['parametrizable', (compiler) => {
     return 0
   })
 }]
-
 function js (fn) {
   return fn.toString().split('\n').slice(1, -1).join('\n').trim()
 }
-
 function str (fn) {
   return fn.toString() + ')();(()=>{}'
 }
-
 module.exports = { Read, Write, SizeOf }

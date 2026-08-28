@@ -1,10 +1,8 @@
 const { EventEmitter, once } = require('node:events')
 const { WebSocket } = require('ws')
 const { SignalStructure } = require('../nethernet/index')
-const { v4fast: v4 } = require("uuid-1345")
+const { v4 } = require("uuid")
 const JSONBigInt = require('json-bigint')({ useNativeBigInt: true })
-
-const PlayFabAPI = require("../../../common/PlayFab")
 
 const MessageType = {
     RequestPing: 0,
@@ -15,15 +13,13 @@ const MessageType = {
 const MAX_RETRIES = 5
 
 class NethernetSignal extends EventEmitter {
-    constructor(client, networkId, authflow, version, serverNetworkId) {
+    constructor(networkId, authflow, version) {
         super()
         this.networkId = networkId
         this.authflow = authflow
         this.version = version
-        this.serverNetworkId = serverNetworkId
         this.ws = null
         this.credentials = []
-        this.client = client
 
         this.pingInterval = null
         this.retryCount = 0
@@ -38,7 +34,9 @@ class NethernetSignal extends EventEmitter {
         await this.init()
         await Promise.race([
             once(this, "credentials"),
-            new Promise((_, reject) => setTimeout(() => reject(), 15000))
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Timed out waiting for credentials")), 15000)
+            )
         ])
     }
 
@@ -87,60 +85,34 @@ class NethernetSignal extends EventEmitter {
 
         try {
             await this.init();
-        } catch (e) { }
+        } catch (e) {}
     }
 
     async init() {
-        const PFAPI = new PlayFabAPI(this.client.options.userId)
-        const pfb = await PFAPI.loginWithXbox()
+        const xbl = await this.authflow.getMinecraftBedrockServicesToken({ version: this.version })
+        const address = `wss://signal.franchise.minecraft-services.net/ws/v1.0/signaling/${this.networkId}`
 
-        if (pfb?.code) {
-            switch (pfb.code) {
-                case 403:
-                    if (pfb?.error === "AccountBanned") {
-                        // VERTEX will simply pick it up if it's banned by using this
-                        this.client.emit("error", "/multiplayer/bedrock/authentication");
-                    }
-                    break;
-            }
+        const ws = new WebSocket(address, { headers: { Authorization: xbl.mcToken, "session-id": this.networkId, "request-id": v4() } })
+        this.ws = ws
+        this.lastLiveness = Date.now()
 
-            return
-        }
+        ws.on("open", () => this.onOpen())
+        ws.on("close", (code, reason) => this.onClose(code, reason.toString()))
+        ws.on("error", (err) => this.onError(err))
+        ws.on("message", (data) => this.onMessage(data))
 
-        const xbl = await PFAPI.servicesToken()
-        const address = `wss://signal.franchise.minecraft-services.net/ws/v1.0/signaling/${this.networkId}`;
+        if (!this.pingInterval) {
+            this.pingInterval = setInterval(() => {
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
 
-        if (typeof xbl.result.authorizationHeader != "string") {
-            this.client.emit("error", "No MCTOKEN Found")
+                this.ws.send(JSON.stringify({ Type: MessageType.RequestPing }))
 
-            return;
-        }
-
-        try {
-            const ws = new WebSocket(address, { headers: { Authorization: xbl.result.authorizationHeader, "session-id": this.networkId, "request-id": v4() } })
-            this.ws = ws
-            this.lastLiveness = Date.now()
-
-            ws.on("open", () => this.onOpen())
-            ws.on("close", (code, reason) => this.onClose(code, reason.toString()))
-            ws.on("error", (err) => this.onError(err))
-            ws.on("message", (data) => this.onMessage(data))
-
-            if (!this.pingInterval) {
-                this.pingInterval = setInterval(() => {
-                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-
-                    this.ws.send(JSON.stringify({ Type: MessageType.RequestPing }))
-
-                    if (Date.now() - this.lastLiveness > 60000) {
-                        try {
-                            this.ws.terminate?.()
-                        } catch { }
-                    }
-                }, 2000)
-            }
-        } catch (error) {
-            this.emit("error", error)
+                if (Date.now() - this.lastLiveness > 60000) {
+                    try {
+                        this.ws.terminate?.()
+                    } catch {}
+                }
+            }, 2000)
         }
     }
 
@@ -149,10 +121,7 @@ class NethernetSignal extends EventEmitter {
         this.lastLiveness = Date.now()
     }
 
-    onError(err) {
-        console.error(err);
-        this.client.emit("error", `Signaling WebSocket error`)
-     }
+    onError(err) { }
 
     async onClose(code, reason) {
         if (this.ws === null && this.pingInterval) {
@@ -162,9 +131,6 @@ class NethernetSignal extends EventEmitter {
 
         if (this.destroyed) return
 
-        // 1006 closure
-        // 1011 error
-        // 4401 unauthorized
         const retryable = [1006, 1011, 4401].includes(code) || code === 0
 
         if (retryable && this.retryCount < MAX_RETRIES) {
@@ -202,7 +168,6 @@ class NethernetSignal extends EventEmitter {
             case MessageType.Signal:
                 const signal = SignalStructure.fromString(message.Message)
                 signal.networkId = message.From
-                signal.serverNetworkId = this.serverNetworkId
                 this.emit("signal", signal)
                 break
             case MessageType.RequestPing:
@@ -217,7 +182,7 @@ class NethernetSignal extends EventEmitter {
         if (!this.ws) throw new Error('WebSocket not connected')
 
         const message = JSONBigInt.stringify({ Type: MessageType.Signal, To: signal.serverNetworkId, Message: signal.toString() })
-
+        
         this.ws.send(message)
     }
 }

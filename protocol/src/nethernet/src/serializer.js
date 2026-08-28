@@ -26,9 +26,4 @@ function createDeserializer () {
   return new FullPacketParser(proto, 'nethernet_packet')
 }
 
-module.exports = {
-  PACKET_TYPE,
-  createDeserializer,
-  createSerializer,
-  createProtocol
-}
+module.exports = { PACKET_TYPE, createDeserializer, createSerializer, createProtocol }

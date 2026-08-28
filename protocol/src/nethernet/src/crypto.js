@@ -3,9 +3,7 @@ const crypto = require('node:crypto')
 const appIdBuffer = Buffer.allocUnsafe(8)
 appIdBuffer.writeBigUInt64LE(BigInt(0xdeadbeef))
 
-const AES_KEY = crypto.createHash('sha256')
-  .update(appIdBuffer)
-  .digest()
+const AES_KEY = crypto.createHash('sha256').update(appIdBuffer).digest()
 
 function encrypt (data) {
   const cipher = crypto.createCipheriv('aes-256-ecb', AES_KEY, null)
@@ -23,8 +21,4 @@ function calculateChecksum (data) {
   return hmac.digest()
 }
 
-module.exports = {
-  encrypt,
-  decrypt,
-  calculateChecksum
-}
+module.exports = { encrypt, decrypt, calculateChecksum }

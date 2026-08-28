@@ -1,29 +1,20 @@
 const { ClientStatus, Connection } = require('./connection')
-const { createDeserializer, createSerializer } = require('./transforms/serializer')
+const { createDeserializer, createSerializer, PROTOCOL_VERSION, GAME_VERSION } = require('./transforms/serializer')
 const { NethernetClient } = require('./nethernet')
 const { RakClient } = require('./rak')
 const { authenticate } = require('./client/auth')
+const { NethernetSignal } = require('./websocket/signal')
+const { NethernetJSONRPC } = require('./websocket/signal-jsonrpc')
+
 const JWT = require('jsonwebtoken')
 const crypto = require('crypto')
 
+const steve = require("./skins/steve.json");
+
+const { v3, v4, NIL } = require('uuid')
+
 const pem = { format: 'pem', type: 'sec1' }
 const der = { format: 'der', type: 'spki' }
-
-function readVarInt(buf, offset = 0) {
-    let numRead = 0
-    let result = 0
-    let read
-    do {
-        if (offset + numRead >= buf.length) throw new Error('VarInt exceeds buffer length')
-        read = buf[offset + numRead]
-        const value = read & 0x7F
-        result |= (value << (7 * numRead))
-        numRead++
-        if (numRead > 5) throw new Error('VarInt too big')
-    } while ((read & 0x80) !== 0)
-
-    return { value: result, size: numRead }
-}
 
 class Client extends Connection {
     connection
@@ -35,27 +26,44 @@ class Client extends Connection {
         this.compressionThreshold = 512
         this.compressionLevel = options.compressionLevel
 
-        if (this.options.transport === 'NETHERNET' || this.options.transport === "NETHERNET_JSONRPC") this.nethernet = {}
+        if (this.options.transport.includes('NETHERNET')) this.nethernet = {}
 
         if (!options.delayedInit) this.init()
     }
 
-    init() {
+    async init() {
         this.serializer = createSerializer()
         this.deserializer = createDeserializer()
         this.features = { compressorInHeader: true }
+
+        if (this.options.protocolVersion != null && this.options.protocolVersion !== PROTOCOL_VERSION) {
+            console.warn(`[bedrockx] options.protocolVersion (${this.options.protocolVersion}) does not match the bundled schema's protocol (${PROTOCOL_VERSION}, game version ${GAME_VERSION}); overriding to ${PROTOCOL_VERSION} so encoded packets match what's declared to the server.`)
+        }
+        this.options.protocolVersion = PROTOCOL_VERSION
+        if (this.options.version == null) this.options.version = GAME_VERSION
 
         this.ecdhKeyPair = crypto.generateKeyPairSync('ec', { namedCurve: "secp384r1" })
         this.clientX509 = this.ecdhKeyPair.publicKey.export(der).toString('base64')
         this.privateKeyPEM = this.ecdhKeyPair.privateKey.export(pem)
 
+        await authenticate(this, this.options)
+
         switch (this.options.transport) {
             case "NETHERNET":
             case "NETHERNET_JSONRPC":
-                this.connection = new NethernetClient({ networkId: this.options.networkId, closeOnError: true })
+                this.connection = new NethernetClient({ networkId: this.options.networkId, token: this.token, privateKey: this.ecdhKeyPair.privateKey })
 
                 this.batchHeader = null
                 this.disableEncryption = true
+
+                this.nethernet.signalling = this.options.transport === "NETHERNET_JSONRPC" ? new NethernetJSONRPC(this.connection.nethernet.networkId, this.options.authflow, this.options.version, this.options.networkId) : new NethernetSignal(this.connection.nethernet.networkId, this.options.authflow, this.options.version, this.options.networkId)
+
+                await this.nethernet.signalling.connect()
+
+                this.connection.nethernet.credentials = this.nethernet.signalling.credentials
+                this.connection.nethernet.signalHandler = this.nethernet.signalling.write.bind(this.nethernet.signalling)
+
+                this.nethernet.signalling.on('signal', signal => this.connection.nethernet.handleSignal(signal))
                 break;
             case "DEFAULT":
                 this.connection = new RakClient({ host: this.options.host, port: this.options.port })
@@ -72,25 +80,24 @@ class Client extends Connection {
 
     connect() {
         if (!this.connection) throw new Error('Connect not currently allowed')
-        this.on('session', this._connect)
-        authenticate(this, this.options)
+        this._connect()
+    }
+
+    onEncapsulated = (encapsulated) => {
+        this.handle(Buffer.from(encapsulated.buffer))
     }
 
     _connect = async () => {
         this.connection.onConnected = () => {
             this.status = ClientStatus.Connecting
             this.write('request_network_settings', { client_protocol: this.options.protocolVersion })
-            this.emit('connected')
         }
 
-        this.connection.onCloseConnection = () => {
-            this.close()
+        this.connection.onCloseConnection = (reason) => {
+            this.close(reason)
         }
 
-        this.connection.onEncapsulated = (encapsulated) => {
-            this.handle(Buffer.from(encapsulated.buffer))
-        }
-
+        this.connection.onEncapsulated = this.onEncapsulated
         this.connection.connect()
     }
 
@@ -99,27 +106,37 @@ class Client extends Connection {
 
         let payload = {
             GameVersion: this.options.version,
-            ServerAddress: `${this.options.host}:${this.options.port}`,
+            PersonaSkin: true,
+            DeviceOS: 2,
+            DeviceId: v3(v4(), NIL).replace(/-/g, '').toUpperCase(),
+            DeviceModel: 'iPhone14,3',
+            CurrentInputMode: 2,
+            DefaultInputMode: 2,
+            SelfSignedId: v3(v4(), NIL),
+            GUIScale: 0,
+            UIProfile: 1,
+            LanguageCode: 'en_US',
+            MaxViewDistance: 12,
+            MemoryTier: 4,
+            PlatformType: 1,
+            GraphicsMode: 1,
+            TrustedSkin: true,
+            OverrideSkin: false,
+            ...steve,
             ...this.options.skinData
         }
 
-        let chain = [this.clienttoken, ...this.chain]
-        let Certificate = JSON.stringify({ chain })
+        const PlayFabId = this.tokenData.mid.toLowerCase() || "";
 
-        if (this.options.crash.enabled) {
-            switch (this.options.crash.type) {
-                case 4:
-                    Certificate = JSON.stringify({ chain: Array(500001).fill("") })
-                    this.token = ""
-                    break
-            }
-        }
+        const updPFID = (data) => btoa(atob(data).replaceAll(`aed7e8a4d485a49a-5`, `${PlayFabId}-5`));
+        payload.SkinId = `persona-${PlayFabId || ""}-5`;
+        payload.SkinGeometryData = updPFID(payload.SkinGeometryData);
+        payload.SkinResourcePatch = updPFID(payload.SkinResourcePatch);
 
-        // tsl - 1.26.10 no longer uses the Certificate chain and relies on the Token but im too lazy to change :3
         this.write('login', {
             protocol_version: this.options.protocolVersion,
             tokens: {
-                identity: JSON.stringify({ AuthenticationType: 0, Certificate, Token: this.token }),
+                identity: JSON.stringify({ AuthenticationType: 0, Certificate: JSON.stringify({ chain: [] }), Token: this.token }),
                 client: JWT.sign(payload, this.ecdhKeyPair.privateKey, { algorithm: 'ES384', header: { x5u: this.clientX509 } })
             }
         })
@@ -131,26 +148,26 @@ class Client extends Connection {
         this.close(reason)
     }
 
-    close() {
-        if (this.status !== ClientStatus.Disconnected) this.emit('close') // Emit close once
+    close(reason) {
+        if (this.status === ClientStatus.Disconnected) return
+        this.emit('close', reason)
         this.batch = null;
         this.connection?.close()
-        if (this.options.transport.includes("NETHERNET") && this.nethernet?.signalling) this.nethernet.signalling.destroy()
         this.removeAllListeners()
         this.status = ClientStatus.Disconnected
+        if (!this.options.transport.includes("NETHERNET")) return
+        if (this.nethernet?.signalling) this.nethernet.signalling.destroy()
+        this.nethernet = null
     }
 
     readPacket(packet) {
-        if (this.disableSubListeners && readVarInt(packet, 0).value >= 1024) return;
-
         try {
-            var des = this.deserializer.parsePacketBuffer(packet) // eslint-disable-line
+            var des = this.deserializer.parsePacketBuffer(packet)
         } catch (e) {
             this.emit('error', e)
             return
         }
 
-        // Abstract some boilerplate before sending to listeners
         switch (des.data.name) {
             case 'network_settings':
                 this.compressionAlgorithm = des.data.params.compression_algorithm || 'deflate'
@@ -168,10 +185,10 @@ class Client extends Connection {
                     this.startEncryption(this.secretKeyBytes.slice(0, 16))
                 }
 
-                this.options.crash.enabled && this.options.crash.type === 5 ? this.writeBatch('client_to_server_handshake', {}, 10000000) : this.write('client_to_server_handshake', {})
+                this.write('client_to_server_handshake', {})
                 this.status = ClientStatus.Initializing
                 break
-            case 'disconnect': // Client kicked
+            case 'disconnect':
                 this.emit('kick', des.data.params)
                 this.close()
                 break

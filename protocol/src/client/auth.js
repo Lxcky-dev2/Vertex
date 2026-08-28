@@ -1,7 +1,4 @@
-const { Authflow } = require('../../../authentication/index')
-const { translateUUID } = require('../../../common/Util')
-
-const JWT = require('jsonwebtoken')
+const { Authflow } = require('prismarine-auth')
 
 async function authenticate(client, options) {
   try {
@@ -35,34 +32,13 @@ async function authenticate(client, options) {
 
     const signedToken = result.result.signedToken
 
-    const chains = await options.authflow.getMinecraftBedrockToken(client.clientX509).catch(e => {
-      throw e
-    })
+    const [h, payload] = signedToken.split('.').map(k => Buffer.from(k, 'base64'))
     
-    const Mjwt = chains[0]
-    const jwt = chains[1]
-    const [h, payload] = jwt.split('.').map(k => Buffer.from(k, 'base64')) // eslint-disable-line
-    const [Mh, Mpayload] = Mjwt.split('.').map(k => Buffer.from(k, 'base64'))
-    const xboxProfile = JSON.parse(String(payload))
-    const mojangPayload = JSON.parse(String(Mpayload))
-    const mojangHeader = JSON.parse(String(Mh))
- 
-    let clientpayload = {
-      certificateAuthority: true,
-      exp: mojangPayload.exp,
-      identityPublicKey: mojangHeader.x5u,
-      nbf: mojangPayload.nbf,
-    }
-
-    const clienttoken = JWT.sign(clientpayload, client.privateKeyPEM, { algorithm: "ES384", noTimestamp: true, header: { x5u: xboxProfile.identityPublicKey, alg: "ES384", typ: undefined } })
-
-    client.profile = xboxProfile?.extraData
-    client.profile.uuid = translateUUID(client.profile.identity)
-    client.chain = chains
-    client.clienttoken = clienttoken
+    client.tokenData = JSON.parse(String(payload))
     client.token = signedToken
-    client.emit('session', xboxProfile)
+    client.emit('session')
   } catch (err) {
+    console.error(err)
     client.emit('error', err)
   }
 }

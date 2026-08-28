@@ -68,7 +68,7 @@ function createDecryptor(client, iv) {
         buffer = packet.slice(1)
         break
       default:
-        buffer = Zlib.inflateRawSync(packet, { chunkSize: 512000 })
+        buffer = Zlib.inflateRawSync(packet.slice(1), { chunkSize: 512000 })
     }
 
     client.onDecryptedPacket(buffer)
@@ -81,6 +81,4 @@ function createDecryptor(client, iv) {
   }
 }
 
-module.exports = {
-  createCipher, createDecipher, createEncryptor, createDecryptor
-}
+module.exports = { createCipher, createDecipher, createEncryptor, createDecryptor }

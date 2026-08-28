@@ -7,7 +7,7 @@ class NethernetClient {
     this.onCloseConnection = () => {}
     this.onEncapsulated = () => {}
 
-    this.nethernet = new Client(options.networkId, "255.255.255.255", options.closeOnError)
+    this.nethernet = new Client(options.networkId, "255.255.255.255", options.token, options.privateKey)
 
     this.nethernet.on('connected', (client) => {
       if (this.connected) return
@@ -16,7 +16,7 @@ class NethernetClient {
       this.connected = true
     });
 
-    this.nethernet.on('disconnect', (reason) => {
+    this.nethernet.on('disconnect', (_id, reason) => {
       this.onCloseConnection(reason)
       this.connected = false
     });
@@ -30,8 +30,8 @@ class NethernetClient {
     await this.nethernet.connect()
   }
 
-  sendReliable(data, immediate, num) {
-    this.nethernet.send(data, num)
+  sendReliable(data) {
+    this.nethernet.send(data)
   }
 
   set credentials(value) {

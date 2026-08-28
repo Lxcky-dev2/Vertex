@@ -3,7 +3,6 @@ const zlib = require('zlib')
 
 class Framer {
   constructor(client) {
-    // Encoding
     this.packets = []
     this.updateCompressionSettings(client)
   }
@@ -14,10 +13,9 @@ class Framer {
     this.compressionLevel = client.compressionLevel
     this.compressionThreshold = client.compressionThreshold
     this.compressionHeader = client.compressionHeader || 0
-    this.writeCompressor = client.compressionReady
+    this.writeCompressor = Boolean(client.features?.compressorInHeader && client.compressionReady)
   }
 
-  // No compression in base class
   compress(buffer) {
     switch (this.compressor) {
       case 'deflate': return zlib.deflateRawSync(buffer, { level: this.compressionLevel })
@@ -32,8 +30,8 @@ class Framer {
         return zlib.inflateRawSync(buffer, { chunkSize: 512000 })
       case 'none':
       case 255:
-      default:
         return buffer
+      default: throw Error('Unknown compression type ' + algorithm)
     }
   }
 
@@ -57,44 +55,21 @@ class Framer {
   }
 
   encode() {
-    let buf;
-    if (this.packets.length === 1) {
-      buf = this.packets[0];
-    } else {
-      buf = Buffer.concat(this.packets);
-    }
-    const shouldCompress = buf.length > this.compressionThreshold;
-    const header = this.batchHeader ? [this.batchHeader] : [];
-    if (this.writeCompressor) header.push(shouldCompress ? this.compressionHeader : 255);
-    if (header.length === 0 && !shouldCompress) return buf;
-    return Buffer.concat([Buffer.from(header), shouldCompress ? this.compress(buf) : buf]);
+    const buf = Buffer.concat(this.packets)
+    const shouldCompress = buf.length > this.compressionThreshold
+    const header = this.batchHeader ? [this.batchHeader] : []
+
+    if (this.writeCompressor) header.push(shouldCompress ? this.compressionHeader : 255)
+
+    return Buffer.concat([Buffer.from(header), shouldCompress ? this.compress(buf) : buf])
   }
 
   addEncodedPacket(chunk) {
-    const varIntSize = sizeOfVarInt(chunk.byteLength);
-    const buffer = Buffer.allocUnsafe(varIntSize + chunk.byteLength);
-    writeVarInt(chunk.byteLength, buffer, 0);
-    chunk.copy(buffer, varIntSize);
-    this.packets.push(buffer);
-  }
+    const varIntSize = sizeOfVarInt(chunk.byteLength)
+    const buffer = Buffer.allocUnsafe(varIntSize + chunk.byteLength)
 
-  addEncodedPackets(packets) {
-    let allocSize = 0;
-
-    for (let i = 0; i < packets.length; i++) {
-      const chunk = packets[i]
-      allocSize += sizeOfVarInt(chunk.byteLength) + chunk.byteLength
-    }
-
-    const buffer = Buffer.allocUnsafe(allocSize)
-    let offset = 0
-
-    for (let i = 0; i < packets.length; i++) {
-      const chunk = packets[i]
-      offset = writeVarInt(chunk.byteLength, buffer, offset)
-      chunk.copy(buffer, offset)
-      offset += chunk.byteLength
-    }
+    writeVarInt(chunk.length, buffer, 0)
+    chunk.copy(buffer, varIntSize)
 
     this.packets.push(buffer)
   }
@@ -112,7 +87,6 @@ class Framer {
     let offset = 0;
 
     while (offset < buffer.byteLength) {
-      try{ // fuck you "The value of "offset" is out of range"
       const { value, size } = readVarInt(buffer, offset);
       offset += size;
 
@@ -120,7 +94,6 @@ class Framer {
       packets.push(packet);
 
       offset += value;
-      } catch {}
     }
 
     return packets;

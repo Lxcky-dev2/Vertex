@@ -19,7 +19,6 @@ function writeUUID (value, buffer, offset) {
   return offset + 16
 }
 
-// Little Endian + varints
 
 function readNbt (buffer, offset) {
   return protoLEV.read(buffer, offset, 'nbt')
@@ -33,11 +32,9 @@ function sizeOfNbt (value) {
   return protoLEV.sizeOf(value, 'nbt')
 }
 
-// Little Endian
 
 function readNbtLE (buffer, offset) {
   const r = protoLE.read(buffer, offset, 'nbt')
-  // End size is 3 for some reason
   if (r.value.type === 'end') return { value: r.value, size: 1 }
   return r
 }
